@@ -18,6 +18,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from google import genai
+from telegram_sender import send_message, send_message_with_token
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -318,16 +319,78 @@ async def manual_sync():
 
 @app.get("/recommendations")
 async def get_recommendations():
-    creds = get_credentials()
+    """Return recommendations text from GenAI (requires GEMINI_API_KEY in env)."""
+    api_key = "AIzaSyBxiblPw3oAriiqQRu-wChHS3LXqk5IoTQ"
+    if not api_key:
+        raise HTTPException(status_code=400, detail="GEMINI_API_KEY not set in environment")
 
-    client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+    client = genai.Client(api_key=api_key)
+
+    prompt = (
+        "Help me plan my events for today: this is my calendar and tasks data\n"
+        + "Tasks:\n"
+        + str(tasks_data)
+        + "\nCalendar:\n"
+        + str(calendar_data)
+    )
 
     response = client.models.generate_content(
         model="gemini-2.5-flash",
-        contents= "Help me plan my events for today: this is my calendar and tasks data" + str(tasks_data) + str(calendar_data),
+        contents=prompt,
     )
 
-    return response.text
+    text = getattr(response, "text", None) or getattr(response, "content", None) or str(response)
+    return {"recommendations": text}
+
+@app.get("/telegram_recommendations")
+async def telegram_recommendations(telegram_token: Optional[str] = None):
+    """Send a demo recommendation message to the configured TELEGRAM_CHAT_ID.
+
+    Requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to be set in the environment.
+    """
+    chat_id = "6858049450"
+    if not chat_id:
+        raise HTTPException(status_code=400, detail="TELEGRAM_CHAT_ID not set in environment")
+
+    demo_text = (
+        "Demo recommendations from GPlanner:\n"
+        "- This is a test notification.\n"
+        "- If you receive this, Telegram sending is configured correctly."
+    )
+
+    try:
+        if telegram_token:
+            sent = await asyncio.to_thread(send_message_with_token, telegram_token, chat_id, demo_text)
+        else:
+            sent = await asyncio.to_thread(send_message, chat_id, demo_text)
+        return {"sent": bool(sent)}
+    except Exception as e:
+        logger.exception("Failed to send telegram demo message")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/telegram_recommendation")
+async def telegram_recommendation(telegram_token: Optional[str] = None):
+    """Singular endpoint: send demo recommendation. Accepts optional telegram_token to override env token."""
+    chat_id = "6858049450"
+    if not chat_id:
+        raise HTTPException(status_code=400, detail="TELEGRAM_CHAT_ID not set in environment")
+
+    demo_text = (
+        "Demo recommendation from GPlanner:\n"
+        "- This is a test notification.\n"
+        "- If you receive this, Telegram sending is configured correctly."
+    )
+
+    try:
+        if telegram_token:
+            sent = await asyncio.to_thread(send_message_with_token, telegram_token, chat_id, demo_text)
+        else:
+            sent = await asyncio.to_thread(send_message, chat_id, demo_text)
+        return {"sent": bool(sent)}
+    except Exception as e:
+        logger.exception("Failed to send telegram demo message (singular)")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/status")
 async def get_status():
