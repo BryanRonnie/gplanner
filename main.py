@@ -19,6 +19,7 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from google import genai
 from telegram_sender import send_message, send_message_with_token
+from telegram_receiver import get_messages_from_user, get_updates, mark_updates_as_read
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -243,7 +244,11 @@ async def root():
             "events": "/events - Get calendar events only",
             "tasks": "/tasks - Get tasks only",
             "sync": "/sync - Manually trigger sync",
-            "status": "/status - Check sync status"
+            "status": "/status - Check sync status",
+            "telegram_messages": "/telegram/messages - Get messages from Telegram user",
+            "telegram_updates": "/telegram/updates - Get all Telegram updates",
+            "telegram_mark_read": "/telegram/mark_read - Mark messages as read",
+            "telegram_webhook": "/telegram/webhook - Webhook for real-time Telegram messages"
         }
     }
 
@@ -406,6 +411,169 @@ async def get_status():
         "tasks_last_updated": tasks_data["last_updated"],
         "next_sync": "Every hour" if scheduler.running else "Scheduler not running"
     }
+
+@app.get("/telegram/messages")
+async def get_telegram_messages(
+    user_id: Optional[str] = None,
+    limit: int = 10
+):
+    """Get recent messages from Telegram.
+    
+    Args:
+        user_id: Optional Telegram user ID to filter messages. If not provided, uses TELEGRAM_CHAT_ID from env
+        limit: Maximum number of messages to retrieve (default: 10)
+    
+    Returns:
+        List of recent messages
+    """
+    target_user = user_id or os.getenv('TELEGRAM_CHAT_ID')
+    if not target_user:
+        raise HTTPException(
+            status_code=400, 
+            detail="user_id parameter or TELEGRAM_CHAT_ID environment variable must be set"
+        )
+    
+    try:
+        messages = await asyncio.to_thread(get_messages_from_user, target_user, limit=limit)
+        return {
+            "user_id": target_user,
+            "message_count": len(messages),
+            "messages": messages
+        }
+    except Exception as e:
+        logger.exception("Failed to get Telegram messages")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/telegram/updates")
+async def get_telegram_updates(offset: Optional[int] = None, limit: int = 100):
+    """Get all Telegram updates (messages, commands, etc.).
+    
+    Args:
+        offset: Identifier of the first update to be returned
+        limit: Maximum number of updates to retrieve (1-100, default: 100)
+    
+    Returns:
+        Telegram updates response
+    """
+    try:
+        updates = await asyncio.to_thread(get_updates, offset=offset, limit=limit)
+        return updates
+    except Exception as e:
+        logger.exception("Failed to get Telegram updates")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/telegram/mark_read")
+async def mark_telegram_read(update_id: int):
+    """Mark Telegram messages as read up to the specified update_id.
+    
+    Args:
+        update_id: The update_id of the last processed message
+    
+    Returns:
+        Success status
+    """
+    try:
+        success = await asyncio.to_thread(mark_updates_as_read, update_id)
+        return {"success": success, "last_update_id": update_id}
+    except Exception as e:
+        logger.exception("Failed to mark Telegram updates as read")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(update: Dict):
+    """Webhook endpoint for receiving Telegram messages in real-time.
+    
+    To use this endpoint:
+    1. Deploy your app with a public URL (e.g., using ngrok, Heroku, etc.)
+    2. Set webhook: https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook?url=<YOUR_URL>/telegram/webhook
+    
+    This endpoint will automatically process incoming messages.
+    """
+    try:
+        logger.info(f"Received Telegram webhook update: {update}")
+        
+        # Extract message information
+        if "message" in update:
+            message = update["message"]
+            chat_id = message.get("chat", {}).get("id")
+            text = message.get("text", "")
+            from_user = message.get("from", {}).get("username", "unknown")
+            
+            logger.info(f"Message from {from_user} (chat_id: {chat_id}): {text}")
+            
+            # Here you can add custom logic to process incoming messages
+            # For example, respond to specific commands:
+            if text.startswith("/"):
+                # Handle commands
+                if text == "/start":
+                    await asyncio.to_thread(
+                        send_message, 
+                        str(chat_id), 
+                        "Welcome to GPlanner! I can help you manage your calendar and tasks."
+                    )
+                elif text == "/help":
+                    help_text = (
+                        "Available commands:\n"
+                        "/start - Start the bot\n"
+                        "/help - Show this help message\n"
+                        "/events - Get your upcoming events\n"
+                        "/tasks - Get your tasks\n"
+                        "/recommendations - Get AI recommendations"
+                    )
+                    await asyncio.to_thread(send_message, str(chat_id), help_text)
+                elif text == "/events":
+                    events = calendar_data["events"][:5]  # Get first 5 events
+                    if events:
+                        events_text = "📅 Upcoming Events:\n\n"
+                        for event in events:
+                            summary = event.get("summary", "No title")
+                            start = event.get("start", {}).get("dateTime", event.get("start", {}).get("date", ""))
+                            events_text += f"• {summary}\n  {start}\n\n"
+                    else:
+                        events_text = "No upcoming events found."
+                    await asyncio.to_thread(send_message, str(chat_id), events_text)
+                elif text == "/tasks":
+                    tasks = tasks_data["tasks"][:5]  # Get first 5 tasks
+                    if tasks:
+                        tasks_text = "✅ Your Tasks:\n\n"
+                        for task in tasks:
+                            title = task.get("title", "No title")
+                            tasks_text += f"• {title}\n"
+                    else:
+                        tasks_text = "No tasks found."
+                    await asyncio.to_thread(send_message, str(chat_id), tasks_text)
+                elif text == "/recommendations":
+                    # Generate recommendations
+                    api_key = os.getenv('GEMINI_API_KEY')
+                    if api_key:
+                        client = genai.Client(api_key=api_key)
+                        prompt = (
+                            "Help me plan my events for today: this is my calendar and tasks data\n"
+                            + "Tasks:\n"
+                            + str(tasks_data)
+                            + "\nCalendar:\n"
+                            + str(calendar_data)
+                        )
+                        response = client.models.generate_content(
+                            model="gemini-2.5-flash",
+                            contents=prompt,
+                        )
+                        rec_text = getattr(response, "text", None) or str(response)
+                        await asyncio.to_thread(send_message, str(chat_id), f"🤖 AI Recommendations:\n\n{rec_text}")
+                    else:
+                        await asyncio.to_thread(send_message, str(chat_id), "GEMINI_API_KEY not configured.")
+            else:
+                # Echo back non-command messages or implement custom logic
+                await asyncio.to_thread(
+                    send_message,
+                    str(chat_id),
+                    f"You said: {text}\n\nUse /help to see available commands."
+                )
+        
+        return {"ok": True}
+    except Exception as e:
+        logger.exception("Error processing Telegram webhook")
+        return {"ok": False, "error": str(e)}
 
 if __name__ == "__main__":
     import uvicorn
