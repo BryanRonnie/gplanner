@@ -37,7 +37,7 @@ def send_message_with_token(bot_token: str, chat_id: str, text: str) -> bool:
     if not chat_id:
         raise ValueError("chat_id is required to send a Telegram message")
 
-    api_url = f"https://api.telegram.org/bot7767903266:AAHFBVglMmnPVUs3fLr4OaNtVpMEKQeGuHU/sendMessage"
+    api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
 
     success = True
     for chunk in _split_text(text, max_chunk=4000):
@@ -62,7 +62,10 @@ def send_message(chat_id: str, text: str) -> bool:
     Returns True if all chunks were sent successfully, False otherwise.
     """
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    return send_message_with_token("7767903266:AAHFBVglMmnPVUs3fLr4OaNtVpMEKQeGuHU", chat_id, text)
+    if not bot_token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN environment variable is not set")
+    
+    return send_message_with_token(bot_token, chat_id, text)
 
 
 if __name__ == "__main__":
