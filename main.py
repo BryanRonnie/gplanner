@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 import asyncio
+from dotenv import load_dotenv
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -20,6 +21,9 @@ from googleapiclient.discovery import build
 from google import genai
 from telegram_sender import send_message, send_message_with_token
 from telegram_receiver import get_messages_from_user, get_updates, mark_updates_as_read
+
+# Load environment variables from .env file
+load_dotenv('.env')
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -87,25 +91,61 @@ class DataResponse(BaseModel):
     tasks_last_updated: Optional[str]
 
 def get_credentials():
-    """Load or refresh Google API credentials."""
+    """Load or refresh Google API credentials.
+
+    Priority:
+    1. GOOGLE_TOKEN_JSON env var (expects JSON string of authorized user info)
+    2. token.json file on disk
+    """
     creds = None
-    
-    if os.path.exists(TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-    
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
+
+    # 1) Try environment variable first
+    token_json = os.getenv("GOOGLE_TOKEN_JSON")
+    token_json1 = os.getenv("GEMINI_API_KEY")
+
+    logger.info(f"GOOGLE_TOKEN_JSON: {token_json is not None}, GEMINI_API_KEY: {token_json1 is not None}")
+
+
+    if token_json:
+        try:
+            info = json.loads(token_json)
+            creds = Credentials.from_authorized_user_info(info, SCOPES)
+            logger.info("Loaded credentials from env:GOOGLE_TOKEN_JSON")
+        except Exception as e:
+            logger.error(f"Error loading credentials from env:GOOGLE_TOKEN_JSON: {e}")
+            creds = None
+
+    # 2) Fallback to token file
+    if not creds and os.path.exists(TOKEN_FILE):
+        try:
+            creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+            logger.info(f"Loaded credentials from {TOKEN_FILE}")
+        except Exception as e:
+            logger.error(f"Error loading credentials from {TOKEN_FILE}: {e}")
+            creds = None
+
+    if not creds:
+        return None
+
+    # Refresh if needed
+    if not creds.valid:
+        if creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
-                # Save the refreshed credentials
-                with open(TOKEN_FILE, 'w') as token:
-                    token.write(creds.to_json())
+                # Save refreshed credentials to disk for future runs
+                try:
+                    with open(TOKEN_FILE, 'w') as token:
+                        token.write(creds.to_json())
+                    logger.info(f"Refreshed credentials saved to {TOKEN_FILE}")
+                except Exception as e:
+                    logger.warning(f"Failed to save refreshed credentials to {TOKEN_FILE}: {e}")
             except Exception as e:
                 logger.error(f"Error refreshing credentials: {e}")
                 return None
         else:
+            # No way to refresh (no refresh token) or not valid for other reasons
             return None
-    
+
     return creds
 
 def create_auth_flow():
@@ -325,12 +365,12 @@ async def manual_sync():
 @app.get("/recommendations")
 async def get_recommendations():
     """Return recommendations text from GenAI (requires GEMINI_API_KEY in env)."""
-    api_key = "AIzaSyBxiblPw3oAriiqQRu-wChHS3LXqk5IoTQ"
+    
+    api_key = os.getenv('GEMINI_API_KEY')
     if not api_key:
         raise HTTPException(status_code=400, detail="GEMINI_API_KEY not set in environment")
 
-    client = genai.Client(api_key=api_key)
-
+    client = genai.Client(api_key=api_key)    
     prompt = (
         "Help me plan my events for today: this is my calendar and tasks data\n"
         + "Tasks:\n"
@@ -353,7 +393,7 @@ async def telegram_recommendations(telegram_token: Optional[str] = None):
 
     Requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to be set in the environment.
     """
-    chat_id = "6858049450"
+    chat_id = os.getenv('TELEGRAM_CHAT_ID')
     if not chat_id:
         raise HTTPException(status_code=400, detail="TELEGRAM_CHAT_ID not set in environment")
 
@@ -377,7 +417,7 @@ async def telegram_recommendations(telegram_token: Optional[str] = None):
 @app.get("/telegram_recommendation")
 async def telegram_recommendation(telegram_token: Optional[str] = None):
     """Singular endpoint: send demo recommendation. Accepts optional telegram_token to override env token."""
-    chat_id = "6858049450"
+    chat_id = os.getenv('TELEGRAM_CHAT_ID')
     if not chat_id:
         raise HTTPException(status_code=400, detail="TELEGRAM_CHAT_ID not set in environment")
 
