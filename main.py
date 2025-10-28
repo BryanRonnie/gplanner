@@ -100,23 +100,25 @@ def get_credentials():
     Priority:
     1. GOOGLE_TOKEN_JSON env var (expects JSON string of authorized user info)
     2. token.json file on disk
+    
+    Returns:
+        Credentials object if valid credentials exist, None otherwise
     """
     creds = None
 
     # 1) Try environment variable first
     token_json = os.getenv("GOOGLE_TOKEN_JSON")
-    token_json1 = os.getenv("GEMINI_API_KEY")
-
-    logger.info(f"GOOGLE_TOKEN_JSON: {token_json is not None}, GEMINI_API_KEY: {token_json1 is not None}")
-
 
     if token_json:
         try:
             info = json.loads(token_json)
             creds = Credentials.from_authorized_user_info(info, SCOPES)
-            logger.info("Loaded credentials from env:GOOGLE_TOKEN_JSON")
+            logger.info("Loaded credentials from GOOGLE_TOKEN_JSON environment variable")
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in GOOGLE_TOKEN_JSON: {e}")
+            creds = None
         except Exception as e:
-            logger.error(f"Error loading credentials from env:GOOGLE_TOKEN_JSON: {e}")
+            logger.error(f"Error loading credentials from GOOGLE_TOKEN_JSON: {e}")
             creds = None
 
     # 2) Fallback to token file
@@ -128,36 +130,102 @@ def get_credentials():
             logger.error(f"Error loading credentials from {TOKEN_FILE}: {e}")
             creds = None
 
+    # If no credentials found, return None
     if not creds:
+        logger.warning("No credentials found. Please authenticate via /auth endpoint")
         return None
 
-    # Refresh if needed
+    # Check if credentials need refresh
     if not creds.valid:
         if creds.expired and creds.refresh_token:
             try:
+                logger.info("Credentials expired, attempting to refresh...")
                 creds.refresh(Request())
-                # Save refreshed credentials to disk for future runs
+                logger.info("Credentials refreshed successfully")
+                
+                # Save refreshed credentials
+                token_data = creds.to_json()
+                
+                # Try to save to file
                 try:
                     with open(TOKEN_FILE, 'w') as token:
-                        token.write(creds.to_json())
+                        token.write(token_data)
                     logger.info(f"Refreshed credentials saved to {TOKEN_FILE}")
-                except Exception as e:
-                    logger.warning(f"Failed to save refreshed credentials to {TOKEN_FILE}: {e}")
+                except IOError as e:
+                    logger.warning(f"Could not save refreshed credentials to {TOKEN_FILE}: {e}")
+                
+                # Also log for manual update to .env if needed
+                logger.info("=" * 80)
+                logger.info("Credentials were refreshed. To persist across deployments,")
+                logger.info("update GOOGLE_TOKEN_JSON in your .env file with:")
+                logger.info(token_data)
+                logger.info("=" * 80)
+                
             except Exception as e:
                 logger.error(f"Error refreshing credentials: {e}")
+                logger.error("Please re-authenticate via /auth endpoint")
                 return None
         else:
-            # No way to refresh (no refresh token) or not valid for other reasons
+            # No refresh token or other issue
+            logger.warning("Credentials invalid and cannot be refreshed. Please re-authenticate via /auth endpoint")
             return None
 
     return creds
 
 def create_auth_flow():
-    """Create OAuth2 flow for authentication."""
-    if not os.path.exists(CREDENTIALS_FILE):
-        raise FileNotFoundError(
-            f"Please download your OAuth2 credentials file and save it as '{CREDENTIALS_FILE}'"
-        )
+    """Create OAuth2 flow for authentication.
+    
+    Supports both credentials.json file and GOOGLE_APPLICATION_CREDENTIALS_JSON env var.
+    
+    Returns:
+        Flow object for OAuth2 authentication
+    
+    Raises:
+        FileNotFoundError: If no credentials source is found
+        ValueError: If credentials are invalid
+    """
+    # Try environment variable first
+    creds_json = os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON')
+    
+    if creds_json:
+        try:
+            credentials_data = json.loads(creds_json)
+            logger.info("Using credentials from GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable")
+            flow = Flow.from_client_config(
+                credentials_data,
+                scopes=SCOPES,
+                redirect_uri=REDIRECT_URI
+            )
+            return flow
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in GOOGLE_APPLICATION_CREDENTIALS_JSON: {e}")
+            raise ValueError(f"Invalid GOOGLE_APPLICATION_CREDENTIALS_JSON format: {e}")
+        except Exception as e:
+            logger.error(f"Error creating flow from environment variable: {e}")
+            raise ValueError(f"Error with GOOGLE_APPLICATION_CREDENTIALS_JSON: {e}")
+    
+    # Fallback to credentials.json file
+    if os.path.exists(CREDENTIALS_FILE):
+        try:
+            logger.info(f"Using credentials from {CREDENTIALS_FILE}")
+            flow = Flow.from_client_secrets_file(
+                CREDENTIALS_FILE,
+                scopes=SCOPES,
+                redirect_uri=REDIRECT_URI
+            )
+            return flow
+        except Exception as e:
+            logger.error(f"Error reading {CREDENTIALS_FILE}: {e}")
+            raise ValueError(f"Invalid credentials file: {e}")
+    
+    # No credentials source found
+    error_msg = (
+        f"No credentials found. Please either:\n"
+        f"1. Set GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable, OR\n"
+        f"2. Place credentials.json file in the application directory"
+    )
+    logger.error(error_msg)
+    raise FileNotFoundError(error_msg)
     
     flow = Flow.from_client_secrets_file(
         CREDENTIALS_FILE,
@@ -200,7 +268,13 @@ async def fetch_calendar_events():
         return []
 
 async def fetch_tasks():
-    """Fetch tasks from Google Tasks API."""
+    """Fetch tasks from Google Tasks API.
+    
+    This function:
+    1. Gets all task lists
+    2. For each task list, fetches all tasks (both completed and incomplete)
+    3. Returns a comprehensive list of all tasks with their metadata
+    """
     try:
         creds = get_credentials()
         if not creds:
@@ -210,26 +284,57 @@ async def fetch_tasks():
         service = build('tasks', 'v1', credentials=creds)
         
         # Get all task lists
-        task_lists = service.tasklists().list().execute()
+        try:
+            task_lists_result = service.tasklists().list(maxResults=100).execute()
+            task_lists = task_lists_result.get('items', [])
+            
+            if not task_lists:
+                logger.info("No task lists found")
+                return []
+            
+            logger.info(f"Found {len(task_lists)} task list(s)")
+            
+        except Exception as e:
+            logger.error(f"Error fetching task lists: {e}")
+            return []
+        
         all_tasks = []
         
-        for task_list in task_lists.get('items', []):
-            tasks = service.tasks().list(
-                tasklist=task_list['id'],
-                showCompleted=False,  # Only get incomplete tasks
-                maxResults=100
-            ).execute()
+        # For each task list, get all tasks
+        for task_list in task_lists:
+            task_list_id = task_list['id']
+            task_list_title = task_list['title']
             
-            for task in tasks.get('items', []):
-                task['taskListId'] = task_list['id']
-                task['taskListTitle'] = task_list['title']
-                all_tasks.append(task)
+            try:
+                # Fetch tasks from this list
+                # showCompleted=True to get all tasks, you can change to False for incomplete only
+                # showHidden=False to exclude hidden/deleted tasks
+                tasks_result = service.tasks().list(
+                    tasklist=task_list_id,
+                    showCompleted=True,  # Change to False if you only want incomplete tasks
+                    showHidden=False,
+                    maxResults=100
+                ).execute()
+                
+                tasks = tasks_result.get('items', [])
+                
+                logger.info(f"  Task list '{task_list_title}': {len(tasks)} task(s)")
+                
+                # Add task list metadata to each task
+                for task in tasks:
+                    task['taskListId'] = task_list_id
+                    task['taskListTitle'] = task_list_title
+                    all_tasks.append(task)
+                    
+            except Exception as e:
+                logger.error(f"Error fetching tasks from list '{task_list_title}': {e}")
+                continue
         
-        logger.info(f"Fetched {len(all_tasks)} tasks")
+        logger.info(f"Fetched {len(all_tasks)} total task(s) across all lists")
         return all_tasks
         
     except Exception as e:
-        logger.error(f"Error fetching tasks: {e}")
+        logger.error(f"Error in fetch_tasks: {e}")
         return []
 
 async def sync_data():
@@ -321,37 +426,118 @@ async def root():
 
 @app.get("/auth")
 async def auth():
-    """Start the OAuth2 authentication flow."""
+    """Start the OAuth2 authentication flow.
+    
+    Returns:
+        Dictionary with authorization URL to visit
+    
+    Raises:
+        HTTPException: If credentials setup fails
+    """
     try:
         flow = create_auth_flow()
-        authorization_url, _ = flow.authorization_url(
+        authorization_url, state = flow.authorization_url(
             access_type='offline',
-            include_granted_scopes='true'
+            include_granted_scopes='true',
+            prompt='consent'  # Force consent screen to ensure refresh token
         )
-        return {"auth_url": authorization_url}
+        logger.info(f"Generated auth URL with state: {state}")
+        return {
+            "auth_url": authorization_url,
+            "instructions": "Visit the auth_url in your browser and complete the OAuth flow"
+        }
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        logger.exception("Unexpected error in auth setup")
         raise HTTPException(status_code=500, detail=f"Auth setup failed: {str(e)}")
 
 @app.get("/auth/callback")
-async def auth_callback(code: str):
-    """Handle OAuth2 callback and save credentials."""
+async def auth_callback(code: str, state: Optional[str] = None):
+    """Handle OAuth2 callback and save credentials.
+    
+    Args:
+        code: Authorization code from Google
+        state: State parameter for CSRF protection (optional)
+    
+    Returns:
+        Success message with instructions
+    
+    Raises:
+        HTTPException: If authentication fails
+    """
     try:
+        logger.info("Processing OAuth callback...")
+        
         flow = create_auth_flow()
-        flow.fetch_token(code=code)
+        
+        # Exchange authorization code for credentials
+        try:
+            flow.fetch_token(code=code)
+        except Exception as e:
+            logger.error(f"Failed to exchange authorization code: {e}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to exchange authorization code. The code may be expired or invalid. Please try /auth again."
+            )
         
         creds = flow.credentials
         
-        # Save credentials
-        with open(TOKEN_FILE, 'w') as token:
-            token.write(creds.to_json())
+        if not creds:
+            raise HTTPException(status_code=500, detail="Failed to obtain credentials")
         
-        # Trigger initial sync
-        await sync_data()
+        # Validate credentials
+        if not creds.valid:
+            raise HTTPException(status_code=500, detail="Obtained credentials are not valid")
         
-        return {"message": "Authentication successful! Data sync initiated."}
+        # Save credentials to file
+        token_data = creds.to_json()
+        try:
+            with open(TOKEN_FILE, 'w') as token:
+                token.write(token_data)
+            logger.info(f"Credentials saved to {TOKEN_FILE}")
+        except IOError as e:
+            logger.error(f"Failed to save credentials to file: {e}")
+            # Continue anyway, credentials are still in memory
+        
+        # Log the token for environment variable setup
+        logger.info("=" * 80)
+        logger.info("✅ Authentication successful!")
+        logger.info("=" * 80)
+        logger.info("To persist these credentials across deployments:")
+        logger.info("Add this to your .env file:")
+        logger.info(f"GOOGLE_TOKEN_JSON={token_data}")
+        logger.info("=" * 80)
+        
+        # Trigger initial data sync
+        try:
+            await sync_data()
+            sync_status = "Data sync completed successfully"
+        except Exception as e:
+            logger.error(f"Initial sync failed: {e}")
+            sync_status = f"Authentication successful but initial sync failed: {str(e)}"
+        
+        return {
+            "message": "Authentication successful!",
+            "sync_status": sync_status,
+            "next_steps": [
+                "Your credentials are now active",
+                f"Token saved to {TOKEN_FILE}",
+                "Check the logs for GOOGLE_TOKEN_JSON to add to your .env file",
+                "Access your data via /data, /events, or /tasks endpoints"
+            ]
+        }
     
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Authentication failed: {str(e)}")
+        logger.exception("Unexpected error in auth callback")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Authentication failed: {str(e)}"
+        )
 
 @app.get("/data", response_model=DataResponse)
 async def get_all_data():
