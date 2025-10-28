@@ -22,6 +22,10 @@ from google import genai
 from telegram_sender import send_message, send_message_with_token
 from telegram_receiver import get_messages_from_user, get_updates, mark_updates_as_read
 
+import uvicorn
+from datetime import time as dtime, datetime
+from apscheduler.triggers.cron import CronTrigger
+
 # Load environment variables from .env file
 load_dotenv('.env')
 
@@ -262,6 +266,29 @@ async def startup_event():
         trigger=IntervalTrigger(hours=1),
         id='sync_google_data',
         name='Sync Google Calendar and Tasks',
+        replace_existing=True
+    )
+
+    # Run every 30 minutes but only send recommendations between 07:30 and 00:30
+
+    async def _telegram_recommendation_job():
+        now = datetime.now().time()
+        start = dtime(7, 30)
+        end = dtime(0, 30)
+        # Window wraps past midnight: true if now >= 07:30 OR now <= 00:30
+        in_window = (now >= start) or (now <= end)
+        if not in_window:
+            return
+        try:
+            await telegram_recommendation()
+        except Exception:
+            logger.exception("Failed to run scheduled telegram_recommendation")
+
+    scheduler.add_job(
+        _telegram_recommendation_job,
+        trigger=CronTrigger(minute="0,30"),
+        id='telegram_recommendation',
+        name='Telegram Recommendation (07:30-00:30)',
         replace_existing=True
     )
     
@@ -616,5 +643,4 @@ async def telegram_webhook(update: Dict):
         return {"ok": False, "error": str(e)}
 
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
