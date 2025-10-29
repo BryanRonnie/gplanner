@@ -40,7 +40,8 @@ SCOPES = [
 ]
 CREDENTIALS_FILE = 'credentials.json'  # Download from Google Cloud Console
 TOKEN_FILE = 'token.json'
-REDIRECT_URI = 'http://localhost:8000/auth/callback'
+# REDIRECT_URI = 'http://localhost:8000/auth/callback'
+REDIRECT_URI = 'http://gplanner.vercel.app/auth/callback'
 
 app = FastAPI(title="Google Calendar & Tasks API", version="1.0.0")
 
