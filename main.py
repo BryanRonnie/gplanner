@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 import asyncio
-from dotenv import load_dotenv
+from dotenv import load_dotenv, set_key
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -19,8 +19,9 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from google import genai
-from telegram_sender import send_message, send_message_with_token
-from telegram_receiver import get_messages_from_user, get_updates, mark_updates_as_read
+from telegram_api.telegram_sender import send_message, send_message_with_token
+from telegram_api.telegram_receiver import get_messages_from_user, get_updates, mark_updates_as_read
+from routes.env_methods import router as env_router, set_env_var
 
 import uvicorn
 from datetime import time as dtime, datetime
@@ -38,10 +39,7 @@ SCOPES = [
     'https://www.googleapis.com/auth/calendar.readonly',
     'https://www.googleapis.com/auth/tasks.readonly'
 ]
-CREDENTIALS_FILE = 'credentials.json'  # Download from Google Cloud Console
-TOKEN_FILE = 'token.json'
-# REDIRECT_URI = 'http://localhost:8000/auth/callback'
-REDIRECT_URI = 'http://gplanner.vercel.app/auth/callback'
+REDIRECT_URI = 'http://localhost:8000/auth/callback'
 
 app = FastAPI(title="Google Calendar & Tasks API", version="1.0.0")
 
@@ -63,6 +61,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(env_router)
 
 
 scheduler = AsyncIOScheduler()
@@ -95,145 +95,129 @@ class DataResponse(BaseModel):
     calendar_last_updated: Optional[str]
     tasks_last_updated: Optional[str]
 
-def get_credentials():
-    """Load or refresh Google API credentials.
-
-    Priority:
-    1. GOOGLE_TOKEN_JSON env var (expects JSON string of authorized user info)
-    2. token.json file on disk
-    
-    Returns:
-        Credentials object if valid credentials exist, None otherwise
-    """
-    creds = None
-
-    # 1) Try environment variable first
+def _build_credentials_payload_from_env() -> Optional[dict]:
+    """Construct the serialized credential payload using only environment variables."""
     token_json = os.getenv("GOOGLE_TOKEN_JSON")
-
     if token_json:
         try:
-            info = json.loads(token_json)
-            creds = Credentials.from_authorized_user_info(info, SCOPES)
-            logger.info("Loaded credentials from GOOGLE_TOKEN_JSON environment variable")
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in GOOGLE_TOKEN_JSON: {e}")
-            creds = None
-        except Exception as e:
-            logger.error(f"Error loading credentials from GOOGLE_TOKEN_JSON: {e}")
-            creds = None
+            return json.loads(token_json)
+        except json.JSONDecodeError:
+            logger.error("GOOGLE_TOKEN_JSON is not valid JSON; falling back to individual env vars")
 
-    # 2) Fallback to token file
-    if not creds and os.path.exists(TOKEN_FILE):
-        try:
-            creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-            logger.info(f"Loaded credentials from {TOKEN_FILE}")
-        except Exception as e:
-            logger.error(f"Error loading credentials from {TOKEN_FILE}: {e}")
-            creds = None
+    token = os.getenv("GOOGLE_APPLICATION_TOKEN")
+    client_id = os.getenv("GOOGLE_APPLICATION_CLIENT_ID")
+    client_secret = os.getenv("GOOGLE_APPLICATION_CLIENT_SECRET")
 
-    # If no credentials found, return None
-    if not creds:
-        logger.warning("No credentials found. Please authenticate via /auth endpoint")
+    if not token or not client_id or not client_secret:
         return None
 
-    # Check if credentials need refresh
+    payload = {
+        "token": token,
+        "refresh_token": os.getenv("GOOGLE_APPLICATION_REFRESH_TOKEN"),
+        "token_uri": os.getenv("GOOGLE_APPLICATION_TOKEN_URI", "https://oauth2.googleapis.com/token"),
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "scopes": SCOPES,
+        "universe_domain": os.getenv("GOOGLE_UNIVERSE_DOMAIN", "googleapis.com"),
+        "account": os.getenv("GOOGLE_APPLICATION_ACCOUNT", ""),
+    }
+
+    expiry = os.getenv("GOOGLE_APPLICATION_TOKEN_EXPIRY")
+    if expiry:
+        payload["expiry"] = expiry
+
+    return payload
+
+
+def _persist_credentials_to_env(creds: Credentials, *, persist: bool = True) -> None:
+    """Persist the credential details back into environment variables and optional .env."""
+    token_json = creds.to_json()
+    set_env_var("GOOGLE_TOKEN_JSON", token_json, persist=persist)
+    set_env_var("GOOGLE_APPLICATION_TOKEN", getattr(creds, "token", None), persist=persist)
+    set_env_var("GOOGLE_APPLICATION_REFRESH_TOKEN", getattr(creds, "refresh_token", None), persist=persist)
+    set_env_var("GOOGLE_APPLICATION_CLIENT_ID", getattr(creds, "client_id", None), persist=persist)
+    set_env_var("GOOGLE_APPLICATION_CLIENT_SECRET", getattr(creds, "client_secret", None), persist=persist)
+    if getattr(creds, "expiry", None):
+        expiry_val = creds.expiry.isoformat() if hasattr(creds.expiry, "isoformat") else str(creds.expiry)
+        set_env_var("GOOGLE_APPLICATION_TOKEN_EXPIRY", expiry_val, persist=persist)
+
+
+def get_credentials() -> Optional[Credentials]:
+    """Load or refresh Google API credentials using environment variables only."""
+    payload = _build_credentials_payload_from_env()
+    if not payload:
+        logger.warning("Google credentials not found in environment. Please authenticate via /auth.")
+        return None
+
+    try:
+        creds = Credentials.from_authorized_user_info(payload, SCOPES)
+    except Exception as exc:
+        logger.error(f"Failed to load credentials from environment: {exc}")
+        return None
+
     if not creds.valid:
         if creds.expired and creds.refresh_token:
             try:
-                logger.info("Credentials expired, attempting to refresh...")
+                logger.info("Refreshing Google credentials from environment...")
                 creds.refresh(Request())
-                logger.info("Credentials refreshed successfully")
-                
-                # Save refreshed credentials
-                token_data = creds.to_json()
-                
-                # Try to save to file
-                try:
-                    with open(TOKEN_FILE, 'w') as token:
-                        token.write(token_data)
-                    logger.info(f"Refreshed credentials saved to {TOKEN_FILE}")
-                except IOError as e:
-                    logger.warning(f"Could not save refreshed credentials to {TOKEN_FILE}: {e}")
-                
-                # Also log for manual update to .env if needed
-                logger.info("=" * 80)
-                logger.info("Credentials were refreshed. To persist across deployments,")
-                logger.info("update GOOGLE_TOKEN_JSON in your .env file with:")
-                logger.info(token_data)
-                logger.info("=" * 80)
-                
-            except Exception as e:
-                logger.error(f"Error refreshing credentials: {e}")
-                logger.error("Please re-authenticate via /auth endpoint")
+                _persist_credentials_to_env(creds)
+                logger.info("Google credentials refreshed and persisted to environment")
+            except Exception as exc:
+                logger.error(f"Failed to refresh Google credentials: {exc}")
                 return None
         else:
-            # No refresh token or other issue
-            logger.warning("Credentials invalid and cannot be refreshed. Please re-authenticate via /auth endpoint")
+            logger.warning("Google credentials invalid and cannot be refreshed. Please re-authenticate.")
             return None
 
     return creds
 
-def create_auth_flow():
-    """Create OAuth2 flow for authentication.
-    
-    Supports both credentials.json file and GOOGLE_APPLICATION_CREDENTIALS_JSON env var.
-    
-    Returns:
-        Flow object for OAuth2 authentication
-    
-    Raises:
-        FileNotFoundError: If no credentials source is found
-        ValueError: If credentials are invalid
-    """
-    # Try environment variable first
-    creds_json = os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON')
-    
-    if creds_json:
+def _build_client_config_from_env() -> Optional[dict]:
+    raw_config = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+    if raw_config:
         try:
-            credentials_data = json.loads(creds_json)
-            logger.info("Using credentials from GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable")
-            flow = Flow.from_client_config(
-                credentials_data,
-                scopes=SCOPES,
-                redirect_uri=REDIRECT_URI
-            )
-            return flow
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in GOOGLE_APPLICATION_CREDENTIALS_JSON: {e}")
-            raise ValueError(f"Invalid GOOGLE_APPLICATION_CREDENTIALS_JSON format: {e}")
-        except Exception as e:
-            logger.error(f"Error creating flow from environment variable: {e}")
-            raise ValueError(f"Error with GOOGLE_APPLICATION_CREDENTIALS_JSON: {e}")
-    
-    # Fallback to credentials.json file
-    if os.path.exists(CREDENTIALS_FILE):
-        try:
-            logger.info(f"Using credentials from {CREDENTIALS_FILE}")
-            flow = Flow.from_client_secrets_file(
-                CREDENTIALS_FILE,
-                scopes=SCOPES,
-                redirect_uri=REDIRECT_URI
-            )
-            return flow
-        except Exception as e:
-            logger.error(f"Error reading {CREDENTIALS_FILE}: {e}")
-            raise ValueError(f"Invalid credentials file: {e}")
-    
-    # No credentials source found
-    error_msg = (
-        f"No credentials found. Please either:\n"
-        f"1. Set GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable, OR\n"
-        f"2. Place credentials.json file in the application directory"
-    )
-    logger.error(error_msg)
-    raise FileNotFoundError(error_msg)
-    
-    flow = Flow.from_client_secrets_file(
-        CREDENTIALS_FILE,
-        scopes=SCOPES,
-        redirect_uri=REDIRECT_URI
-    )
-    return flow
+            parsed = json.loads(raw_config)
+            if "web" not in parsed:
+                logger.warning("GOOGLE_APPLICATION_CREDENTIALS_JSON missing 'web' key; wrapping automatically")
+                parsed = {"web": parsed}
+            return parsed
+        except json.JSONDecodeError as exc:
+            logger.error(f"GOOGLE_APPLICATION_CREDENTIALS_JSON invalid JSON: {exc}")
+
+    client_id = os.getenv("GOOGLE_APPLICATION_CLIENT_ID")
+    client_secret = os.getenv("GOOGLE_APPLICATION_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        return None
+
+    return {
+        "web": {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "project_id": os.getenv("GOOGLE_APPLICATION_PROJECT_ID"),
+            "auth_uri": os.getenv("GOOGLE_APPLICATION_AUTH_URI", "https://accounts.google.com/o/oauth2/auth"),
+            "token_uri": os.getenv("GOOGLE_APPLICATION_TOKEN_URI", "https://oauth2.googleapis.com/token"),
+            "auth_provider_x509_cert_url": os.getenv(
+                "GOOGLE_APPLICATION_AUTH_PROVIDER_X509_CERT_URL",
+                "https://www.googleapis.com/oauth2/v1/certs",
+            ),
+        }
+    }
+
+
+def create_auth_flow() -> Flow:
+    """Create OAuth2 flow for authentication using environment variables only."""
+    client_config = _build_client_config_from_env()
+    if not client_config:
+        raise ValueError(
+            "Google OAuth client configuration not found. "
+            "Set GOOGLE_APPLICATION_CREDENTIALS_JSON or individual client env vars."
+        )
+
+    redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", REDIRECT_URI)
+    try:
+        return Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=redirect_uri)
+    except Exception as exc:
+        logger.exception("Failed to build OAuth flow from environment")
+        raise ValueError(f"Invalid Google client configuration: {exc}")
 
 async def fetch_calendar_events():
     """Fetch calendar events from Google Calendar API."""
@@ -493,24 +477,14 @@ async def auth_callback(code: str, state: Optional[str] = None):
         if not creds.valid:
             raise HTTPException(status_code=500, detail="Obtained credentials are not valid")
         
-        # Save credentials to file
-        token_data = creds.to_json()
+        # Persist credentials entirely to environment variables (and .env for local dev)
         try:
-            with open(TOKEN_FILE, 'w') as token:
-                token.write(token_data)
-            logger.info(f"Credentials saved to {TOKEN_FILE}")
-        except IOError as e:
-            logger.error(f"Failed to save credentials to file: {e}")
-            # Continue anyway, credentials are still in memory
+            _persist_credentials_to_env(creds)
+            logger.info("Credentials saved to environment variables (.env updated if present)")
+        except Exception as e:
+            logger.exception("Failed to persist credentials to environment")
+            raise HTTPException(status_code=500, detail="Failed to save Google credentials")
         
-        # Log the token for environment variable setup
-        logger.info("=" * 80)
-        logger.info("✅ Authentication successful!")
-        logger.info("=" * 80)
-        logger.info("To persist these credentials across deployments:")
-        logger.info("Add this to your .env file:")
-        logger.info(f"GOOGLE_TOKEN_JSON={token_data}")
-        logger.info("=" * 80)
         
         # Trigger initial data sync
         try:
@@ -525,8 +499,7 @@ async def auth_callback(code: str, state: Optional[str] = None):
             "sync_status": sync_status,
             "next_steps": [
                 "Your credentials are now active",
-                f"Token saved to {TOKEN_FILE}",
-                "Check the logs for GOOGLE_TOKEN_JSON to add to your .env file",
+                "Environment variables updated with latest Google tokens",
                 "Access your data via /data, /events, or /tasks endpoints"
             ]
         }
@@ -586,7 +559,7 @@ async def get_recommendations():
 
     client = genai.Client(api_key=api_key)    
     prompt = (
-        "Help me plan my events for today: this is my calendar and tasks data\n"
+        "Help me plan my events for today alone - hourly tasks please based on my calendar and tasks. I'm a very bad procrastinator with ADHD. I need your help badly: this is my calendar and tasks data\n"
         + "Tasks:\n"
         + str(tasks_data)
         + "\nCalendar:\n"
@@ -601,55 +574,18 @@ async def get_recommendations():
     text = getattr(response, "text", None) or getattr(response, "content", None) or str(response)
     return {"recommendations": text}
 
-@app.get("/telegram_recommendations")
-async def telegram_recommendations(telegram_token: Optional[str] = None):
-    """Send a demo recommendation message to the configured TELEGRAM_CHAT_ID.
-
-    Requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to be set in the environment.
-    """
-    chat_id = os.getenv('TELEGRAM_CHAT_ID')
-    if not chat_id:
-        raise HTTPException(status_code=400, detail="TELEGRAM_CHAT_ID not set in environment")
-
-    demo_text = (
-        "Demo recommendations from GPlanner:\n"
-        "- This is a test notification.\n"
-        "- If you receive this, Telegram sending is configured correctly."
-    )
+def create_credentials_json_from_env():
+    """Create Credentials object from GOOGLE_TOKEN_JSON environment variable."""
+    payload = _build_credentials_payload_from_env()
+    if not payload:
+        raise HTTPException(status_code=400, detail="Google credentials not available in environment")
 
     try:
-        if telegram_token:
-            sent = await asyncio.to_thread(send_message_with_token, telegram_token, chat_id, demo_text)
-        else:
-            sent = await asyncio.to_thread(send_message, chat_id, demo_text)
-        return {"sent": bool(sent)}
+        return Credentials.from_authorized_user_info(payload, SCOPES)
     except Exception as e:
-        logger.exception("Failed to send telegram demo message")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/telegram_recommendation")
-async def telegram_recommendation(telegram_token: Optional[str] = None):
-    """Singular endpoint: send demo recommendation. Accepts optional telegram_token to override env token."""
-    chat_id = os.getenv('TELEGRAM_CHAT_ID')
-    if not chat_id:
-        raise HTTPException(status_code=400, detail="TELEGRAM_CHAT_ID not set in environment")
-
-    demo_text = (
-        "Demo recommendation from GPlanner:\n"
-        "- This is a test notification.\n"
-        "- If you receive this, Telegram sending is configured correctly."
-    )
-
-    try:
-        if telegram_token:
-            sent = await asyncio.to_thread(send_message_with_token, telegram_token, chat_id, demo_text)
-        else:
-            sent = await asyncio.to_thread(send_message, chat_id, demo_text)
-        return {"sent": bool(sent)}
-    except Exception as e:
-        logger.exception("Failed to send telegram demo message (singular)")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Failed to create credentials from env")
+        raise HTTPException(status_code=500, detail=f"Failed to create credentials: {str(e)}")
+    
 
 @app.get("/status")
 async def get_status():
@@ -665,6 +601,30 @@ async def get_status():
         "tasks_last_updated": tasks_data["last_updated"],
         "next_sync": "Every hour" if scheduler.running else "Scheduler not running"
     }
+
+@app.get("/telegram_recommendation")
+async def telegram_recommendation(telegram_token: Optional[str] = None):
+    """Singular endpoint: send demo recommendation. Accepts optional telegram_token to override env token."""
+    chat_id = os.getenv('TELEGRAM_CHAT_ID')
+    if not chat_id:
+        raise HTTPException(status_code=400, detail="TELEGRAM_CHAT_ID not set in environment")
+
+    recommendation_data = await get_recommendations()
+    content = recommendation_data.get("recommendations")
+
+    print(telegram_token, chat_id, content)
+
+    if content is None:
+        raise HTTPException(status_code=500, detail="Failed to generate recommendations")
+    try:
+        if telegram_token:
+            sent = await asyncio.to_thread(send_message_with_token, telegram_token, chat_id, content)
+        else:
+            sent = await asyncio.to_thread(send_message, chat_id, content)
+        return {"sent": bool(sent)}
+    except Exception as e:
+        logger.exception("Failed to send telegram demo message (singular)")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/telegram/messages")
 async def get_telegram_messages(
