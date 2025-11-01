@@ -39,7 +39,10 @@ SCOPES = [
     'https://www.googleapis.com/auth/calendar.readonly',
     'https://www.googleapis.com/auth/tasks.readonly'
 ]
-REDIRECT_URI = 'http://localhost:8000/auth/callback'
+
+active_env = os.getenv("ACTIVE_ENV", "development")
+
+REDIRECT_URI = 'http://localhost:8000/auth/callback' if active_env == "development" else 'https://gplanner.vercel.app/auth/callback'
 
 app = FastAPI(title="Google Calendar & Tasks API", version="1.0.0")
 
