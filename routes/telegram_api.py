@@ -2,11 +2,9 @@
 import asyncio
 import logging
 import os
-from typing import Dict, Optional
+from typing import Optional
 
-from dotenv import set_key
-from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException
 
 from routes.gemini_api import get_recommendations
 from routes.tasks_and_calendar_api import sync_data

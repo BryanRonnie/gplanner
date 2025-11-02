@@ -1,12 +1,10 @@
 
 from datetime import datetime, timedelta
 import logging
-import os
 from typing import Dict, List, Optional
 from googleapiclient.discovery import build
 
-from dotenv import set_key
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel
 
 from routes.google_auth import get_credentials

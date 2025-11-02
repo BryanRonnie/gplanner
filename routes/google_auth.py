@@ -158,14 +158,6 @@ def create_auth_flow() -> Flow:
 
 @router.get("/")
 async def auth():
-    """Start the OAuth2 authentication flow.
-    
-    Returns:
-        Dictionary with authorization URL to visit
-    
-    Raises:
-        HTTPException: If credentials setup fails
-    """
     try:
         flow = create_auth_flow()
         authorization_url, state = flow.authorization_url(
@@ -189,18 +181,6 @@ async def auth():
 
 @router.get("/callback")
 async def auth_callback(code: str, state: Optional[str] = None):
-    """Handle OAuth2 callback and save credentials.
-    
-    Args:
-        code: Authorization code from Google
-        state: State parameter for CSRF protection (optional)
-    
-    Returns:
-        Success message with instructions
-    
-    Raises:
-        HTTPException: If authentication fails
-    """
     try:
         logger.info("Processing OAuth callback...")
         
@@ -232,15 +212,6 @@ async def auth_callback(code: str, state: Optional[str] = None):
         except Exception as e:
             logger.exception("Failed to persist credentials to environment")
             raise HTTPException(status_code=500, detail="Failed to save Google credentials")
-        
-        
-        # Trigger initial data sync
-        # try:
-        #     await sync_data()
-        #     sync_status = "Data sync completed successfully"
-        # except Exception as e:
-        #     logger.error(f"Initial sync failed: {e}")
-        #     sync_status = f"Authentication successful but initial sync failed: {str(e)}"
         
         return {
             "message": "Authentication successful!",

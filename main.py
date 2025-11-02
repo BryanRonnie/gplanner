@@ -1,16 +1,10 @@
-import os
 import logging
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+from datetime import datetime
 from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi import FastAPI
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.interval import IntervalTrigger
-
-from googleapiclient.discovery import build
 
 from routes.tasks_and_calendar_api import sync_data
 from routes.telegram_api import router as telegram_router, telegram_recommendation
@@ -58,18 +52,6 @@ scheduler = AsyncIOScheduler()
 @app.on_event("startup")
 async def startup_event():
     """Start the scheduler when the app starts."""
-    # Initial sync
-    # await sync_data()
-    
-    # Schedule hourly sync
-    # scheduler.add_job(
-    #     sync_data,
-    #     trigger=IntervalTrigger(hours=1),
-    #     id='sync_google_data',
-    #     name='Sync Google Calendar and Tasks',
-    #     replace_existing=True
-    # )
-
     # Run every 30 minutes but only send recommendations between 07:30 and 00:30
 
     async def _telegram_recommendation_job():
