@@ -7,10 +7,6 @@ logger = logging.getLogger(__name__)
 
 
 def _split_text(text: str, max_chunk: int = 4000) -> Iterator[str]:
-    """Yield chunks of the text not exceeding max_chunk characters.
-
-    Keeps words intact when possible by splitting on whitespace.
-    """
     if not text:
         return
     start = 0
@@ -26,11 +22,6 @@ def _split_text(text: str, max_chunk: int = 4000) -> Iterator[str]:
 
 
 def send_message_with_token(bot_token: str, chat_id: str, text: str) -> bool:
-    """Send message using an explicit bot token. Returns True on success.
-
-    This helper is useful for testing when you want to pass a token directly
-    rather than relying on an environment variable.
-    """
     if not bot_token:
         raise RuntimeError("bot_token is required to send a Telegram message")
 
@@ -57,10 +48,6 @@ def send_message_with_token(bot_token: str, chat_id: str, text: str) -> bool:
 
 
 def send_message(chat_id: str, text: str) -> bool:
-    """Send one or more messages to the given Telegram chat_id using env token.
-
-    Returns True if all chunks were sent successfully, False otherwise.
-    """
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not bot_token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN environment variable is not set")
@@ -69,16 +56,6 @@ def send_message(chat_id: str, text: str) -> bool:
 
 
 def get_updates(bot_token: Optional[str] = None, offset: Optional[int] = None, limit: int = 100) -> Dict[str, Any]:
-    """Get updates (messages) from Telegram bot.
-    
-    Args:
-        bot_token: Optional bot token, uses env var if not provided
-        offset: Identifier of the first update to be returned
-        limit: Limits the number of updates to be retrieved (1-100, default 100)
-    
-    Returns:
-        Dict with 'ok' status and 'result' list of updates
-    """
     token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN environment variable is not set")
@@ -100,16 +77,6 @@ def get_updates(bot_token: Optional[str] = None, offset: Optional[int] = None, l
 
 
 def get_messages_from_user(user_id: str, bot_token: Optional[str] = None, limit: int = 10) -> list:
-    """Get recent messages from a specific Telegram user.
-    
-    Args:
-        user_id: Telegram user ID or chat ID
-        bot_token: Optional bot token, uses env var if not provided
-        limit: Maximum number of messages to retrieve
-    
-    Returns:
-        List of message objects from the specified user
-    """
     updates = get_updates(bot_token=bot_token, limit=100)
     
     if not updates.get("ok"):
@@ -137,15 +104,6 @@ def get_messages_from_user(user_id: str, bot_token: Optional[str] = None, limit:
 
 
 def mark_updates_as_read(last_update_id: int, bot_token: Optional[str] = None) -> bool:
-    """Mark updates as read by confirming the last update_id.
-    
-    Args:
-        last_update_id: The update_id of the last processed message
-        bot_token: Optional bot token, uses env var if not provided
-    
-    Returns:
-        True if successful, False otherwise
-    """
     token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN environment variable is not set")

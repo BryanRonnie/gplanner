@@ -26,7 +26,7 @@ class EnvUpdate(BaseModel):
     persist: Optional[bool] = False
 
 
-@router.get("/{key}")
+# @router.get("/{key}")
 async def get_env(
     key: str,
     reveal: bool = False,
@@ -45,7 +45,7 @@ async def get_env(
     return {"key": key, "present": value is not None, "value": _mask_value(value)}
 
 
-@router.post("")
+# @router.post("/set-env")
 async def set_env(
     payload: EnvUpdate,
     x_admin_token: Optional[str] = Header(default=None, alias="X-ADMIN-TOKEN"),
