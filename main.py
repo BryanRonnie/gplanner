@@ -5,13 +5,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from fastapi import FastAPI
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import uvicorn
 
-from routes.tasks_and_calendar_api import sync_data
+from routes.tasks_and_calendar_api import router as tasks_router, sync_data
 from routes.telegram_api import router as telegram_router, telegram_recommendation
 from routes.google_auth import get_credentials, router as google_auth_router
 from routes.env_methods import router as env_router
-
-import uvicorn
+from routes.tasks_and_calendar_api import create_daily_plan
 from datetime import time as dtime, datetime
 from apscheduler.triggers.cron import CronTrigger
 
@@ -46,6 +46,7 @@ app.add_middleware(
 app.include_router(env_router)
 app.include_router(telegram_router)
 app.include_router(google_auth_router)
+app.include_router(tasks_router)
 
 scheduler = AsyncIOScheduler()
 
@@ -53,6 +54,27 @@ scheduler = AsyncIOScheduler()
 async def startup_event():
     """Start the scheduler when the app starts."""
     # Run every 30 minutes but only send recommendations between 07:30 and 00:30
+
+    async def _create_daily_plan_job():
+        now = datetime.now().time()
+        start = dtime(7, 30)
+        end = dtime(7, 35)
+        # Window wraps past midnight: true if now >= 07:30 OR now <= 00:30
+        in_window = (now >= start) or (now <= end)
+        if not in_window:
+            return
+        try:
+            await create_daily_plan()
+        except Exception:
+            logger.exception("Failed to run scheduled daily_plan")
+
+    scheduler.add_job(
+        _create_daily_plan_job,
+        trigger=CronTrigger(minute="0,30"),
+        id='daily_plan',
+        name='Daily Plan (07:30-07:35)',
+        replace_existing=True
+    )
 
     async def _telegram_recommendation_job():
         now = datetime.now().time()
@@ -90,10 +112,13 @@ async def root():
         "message": "Google Calendar & Tasks API",
         "endpoints": {
             "auth": "/auth - Start OAuth flow",
-            "data": "/data - Get all calendar events and tasks",
-            "events": "/events - Get calendar events only",
-            "tasks": "/tasks - Get tasks only",
-            "sync": "/sync - Manually trigger sync",
+            "calendar_tasks": "/tasks/data - Get calendar and task snapshot",
+            "calendar_events": "/tasks/events (GET|POST) - List or create events",
+            "calendar_event_update": "/tasks/events/{event_id} (PUT) - Update event details",
+            "calendar_event_reschedule": "/tasks/events/{event_id}/reschedule (POST) - Adjust start/end",
+            "calendar_event_delete": "/tasks/events/{event_id} (DELETE) - Remove an event",
+            "tasks_only": "/tasks/tasks - Get tasks only",
+            "daily_plan": "/tasks/daily_plan (POST) - Create Gemini-crafted task list",
             "status": "/status - Check sync status",
             "telegram_messages": "/telegram/messages - Get messages from Telegram user",
             "telegram_updates": "/telegram/updates - Get all Telegram updates",

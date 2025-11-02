@@ -17,8 +17,8 @@ active_env = os.getenv("ACTIVE_ENV", "development")
 
 REDIRECT_URI = 'http://localhost:8000/auth/callback' if active_env == "development" else 'https://gplanner.vercel.app/auth/callback'
 SCOPES = [
-    'https://www.googleapis.com/auth/calendar.readonly',
-    'https://www.googleapis.com/auth/tasks.readonly'
+    'https://www.googleapis.com/auth/calendar',
+    'https://www.googleapis.com/auth/tasks'
 ]
 
 def _build_credentials_payload_from_env() -> Optional[dict]:
@@ -73,10 +73,24 @@ def get_credentials() -> Optional[Credentials]:
         logger.warning("Google credentials not found in environment. Please authenticate via /auth.")
         return None
 
+    # Force the current SCOPES defined in code, not what's stored in the token
+    payload["scopes"] = SCOPES
+
     try:
         creds = Credentials.from_authorized_user_info(payload, SCOPES)
     except Exception as exc:
         logger.error(f"Failed to load credentials from environment: {exc}")
+        return None
+
+    # Check if the stored scopes match the required scopes
+    stored_scopes = set(payload.get("scopes", []))
+    required_scopes = set(SCOPES)
+    
+    if stored_scopes != required_scopes:
+        logger.warning(
+            f"Stored scopes {stored_scopes} don't match required {required_scopes}. "
+            "Please re-authenticate via /auth to grant new permissions."
+        )
         return None
 
     if not creds.valid:
@@ -162,12 +176,14 @@ async def auth():
         flow = create_auth_flow()
         authorization_url, state = flow.authorization_url(
             access_type='offline',
-            include_granted_scopes='true',
+            include_granted_scopes='false',  # Don't include old scopes, request only current SCOPES
             prompt='consent'  # Force consent screen to ensure refresh token
         )
         logger.info(f"Generated auth URL with state: {state}")
+        logger.info(f"Requesting scopes: {SCOPES}")
         return {
             "auth_url": authorization_url,
+            "scopes_requested": SCOPES,
             "instructions": "Visit the auth_url in your browser and complete the OAuth flow"
         }
     except FileNotFoundError as e:
@@ -177,6 +193,36 @@ async def auth():
     except Exception as e:
         logger.exception("Unexpected error in auth setup")
         raise HTTPException(status_code=500, detail=f"Auth setup failed: {str(e)}")
+
+
+@router.delete("/credentials")
+async def clear_credentials():
+    """Clear stored Google credentials to force re-authentication."""
+    cleared_vars = []
+    
+    env_vars_to_clear = [
+        "GOOGLE_TOKEN_JSON",
+        "GOOGLE_APPLICATION_TOKEN",
+        "GOOGLE_APPLICATION_REFRESH_TOKEN",
+        "GOOGLE_APPLICATION_TOKEN_EXPIRY",
+    ]
+    
+    for var in env_vars_to_clear:
+        if os.getenv(var):
+            os.environ.pop(var, None)
+            cleared_vars.append(var)
+            # Also clear from .env file if it exists
+            try:
+                from dotenv import set_key
+                set_key(".env", var, "")
+            except Exception:
+                pass
+    
+    return {
+        "message": "Credentials cleared",
+        "cleared_variables": cleared_vars,
+        "next_step": "Call GET /auth to start fresh authentication"
+    }
 
 
 @router.get("/callback")
@@ -191,9 +237,19 @@ async def auth_callback(code: str, state: Optional[str] = None):
             flow.fetch_token(code=code)
         except Exception as e:
             logger.error(f"Failed to exchange authorization code: {e}")
+            error_detail = str(e).lower()
+            if "invalid_grant" in error_detail or "code" in error_detail:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Authorization code expired or already used. "
+                        "Codes are single-use and expire in ~10 minutes. "
+                        "Please restart: GET /auth → visit URL → complete consent immediately."
+                    )
+                )
             raise HTTPException(
                 status_code=400,
-                detail=f"Failed to exchange authorization code. The code may be expired or invalid. Please try /auth again."
+                detail=f"OAuth exchange failed: {e}. Please try /auth again."
             )
         
         creds = flow.credentials

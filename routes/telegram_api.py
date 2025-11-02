@@ -37,9 +37,23 @@ async def telegram_recommendation(telegram_token: Optional[str] = None):
     response = await sync_data()
     calendar_data = response.get("calendar_data", {})
     tasks_data = response.get("tasks_data", {})
+    current_time = asyncio.get_event_loop().time()
 
-    gemini_prompt = "Help me plan my events for today alone - hourly tasks please based on my calendar and tasks. I'm a very bad procrastinator with ADHD. I need your help badly: this is my calendar and tasks data\n" + \
-        "Tasks:\n" + str(tasks_data) + "\nCalendar:\n" + str(calendar_data)
+    gemini_prompt = f"""Help me plan my events for today alone. 
+                        This scheduled job runs every 30 mins within this range. 
+                        If the time is not divisible by 30 mins, it's a manual api call. 
+                        The current time is {current_time} - hourly tasks please based on my calendar and tasks. 
+                        I'm a very bad procrastinator with ADHD. I need your help badly: This is my calendar and tasks data. 
+
+
+                        Keep the message concise. No styled characters needed. 
+                        eg. Cooking(Priority Lvl) -> 12pm - 1pm - Short Advice
+                        
+                        The day starts at 7.30am and ends at 12.30am. 
+                        For the first scheduled api call at 7.30am, please plan the whole day for me. Give the tasks with approximate time slots Make sure to leave buffer time for each task. 
+                        If the time is greater than 7.30am, only plan the next few hours ahead based on current time.
+                        Give me progress report with score two times: at 2pm and at 12am.
+                        \n""" + "Tasks:\n" + str(tasks_data) + "\nCalendar:\n" + str(calendar_data)
 
     gemini_output = await get_recommendations(gemini_prompt)
 
@@ -47,8 +61,6 @@ async def telegram_recommendation(telegram_token: Optional[str] = None):
     chat_id_str = str(chat_id)
 
     content = gemini_output.get("recommendations")
-
-    # print(telegram_token, chat_id, content)
 
     if content is None:
         raise HTTPException(status_code=500, detail="Failed to generate recommendations")
